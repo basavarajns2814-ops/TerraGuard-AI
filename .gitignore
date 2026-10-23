@@ -1,0 +1,42 @@
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+.envrc
+.pytest_cache/
+.coverage
+coverage/
+htmlcov/
+
+# Frontend
+node_modules/
+dist/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Datasets and local-only demo/runtime outputs
+datasets/
+data/raw/
+backend/demo_data/
+backend/storage/
+*.log
+
+# Local databases and generated files
+*.db
+*.sqlite3
+*.sqlite
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
