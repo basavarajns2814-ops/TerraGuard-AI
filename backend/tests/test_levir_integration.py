@@ -24,8 +24,10 @@ def test_levir_prediction_upload_returns_model_artifacts(tmp_path):
     assert Path(levir_model_service.model_path).resolve() == (
         project_root / "backend" / "models" / "levir_change_model.joblib"
     ).resolve()
-    earlier = np.asarray(Image.open(earlier_path).convert("RGB"))
-    later = np.asarray(Image.open(later_path).convert("RGB"))
+    with Image.open(earlier_path) as earlier_image:
+        earlier = np.asarray(earlier_image.convert("RGB"))
+    with Image.open(later_path) as later_image:
+        later = np.asarray(later_image.convert("RGB"))
     direct = levir_model_service.artifact
     from ml.levir_model import predict_probability
 
@@ -65,7 +67,9 @@ def test_levir_prediction_upload_returns_model_artifacts(tmp_path):
             assert artifact_response.headers["content-type"] == "image/png"
 
         # Keep the integration test from accumulating generated imagery artifacts.
-        storage_root = project_root / "backend" / "storage"
+        from app.config import settings
+
+        storage_root = Path(settings.STORAGE_DIR)
         for artifact_url in (
             result["earlier_image_url"],
             result["later_image_url"],

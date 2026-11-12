@@ -8,7 +8,7 @@ from app.database import engine, Base
 from app.routers import (
     auth, dashboard, zones, imagery,
     analysis, alerts, reports, notifications,
-    users, settings as app_settings
+    users, settings as app_settings, satellite
 )
 from app.seed import seed_database_if_empty
 
@@ -42,6 +42,7 @@ app.include_router(reports.router)
 app.include_router(notifications.router)
 app.include_router(users.router)
 app.include_router(app_settings.router)
+app.include_router(satellite.router)
 
 @app.on_event("startup")
 def on_startup():

@@ -4,18 +4,19 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from datetime import datetime
+from datetime import date, datetime
 
 from app.config import settings
 from app.database import get_db, SessionLocal
 from app.models import DetectionJob, DetectedChange, SatelliteScene, MonitoringZone
 from app.schemas import (
     DetectionJobCreate, DetectionJobResponse, DetectedChangeSchema,
-    LevirPredictionRequest, LevirPredictionResponse
+    LevirPredictionRequest, LevirPredictionResponse, SNUNetPredictionResponse
 )
 from app.core.deps import get_current_user, require_roles, log_audit
 from app.services.change_detection.service import change_detection_service
 from app.services.levir_service import levir_model_service
+from app.services.snunet_service import snunet_model_service
 
 router = APIRouter(prefix="/api/analysis", tags=["AI Change Detection Analysis"])
 
@@ -57,6 +58,38 @@ def run_analysis(
     db: Session = Depends(get_db),
     current_user = Depends(require_roles(["ADMIN", "MONITORING_OFFICER"]))
 ):
+    zone = db.query(MonitoringZone).filter(MonitoringZone.id == req.zone_id).first()
+    if not zone:
+        raise HTTPException(status_code=404, detail="Monitoring zone not found")
+    historical = db.query(SatelliteScene).filter(
+        SatelliteScene.id == req.historical_scene_id
+    ).first()
+    recent = db.query(SatelliteScene).filter(
+        SatelliteScene.id == req.recent_scene_id
+    ).first()
+    if not historical or not recent:
+        raise HTTPException(status_code=404, detail="Historical or recent satellite scene not found")
+    if historical.id == recent.id:
+        raise HTTPException(status_code=422, detail="Choose two different scenes for comparison")
+    if historical.zone_id != req.zone_id or recent.zone_id != req.zone_id:
+        raise HTTPException(
+            status_code=422,
+            detail="Both satellite scenes must belong to the selected monitoring zone",
+        )
+    try:
+        historical_date = date.fromisoformat(historical.acquisition_date)
+        recent_date = date.fromisoformat(recent.acquisition_date)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Selected scene acquisition dates must use ISO YYYY-MM-DD format",
+        ) from exc
+    if historical_date >= recent_date:
+        raise HTTPException(
+            status_code=422,
+            detail="Historical scene date must be earlier than the recent scene date",
+        )
+
     job_code = f"JOB-{uuid.uuid4().hex[:8].upper()}"
     job = DetectionJob(
         job_code=job_code,
@@ -101,7 +134,26 @@ def list_changes(
     if trend:
         query = query.filter(DetectedChange.trend == trend)
     changes = query.order_by(DetectedChange.created_at.desc()).all()
-    return [DetectedChangeSchema.model_validate(c) for c in changes]
+    job_ids = {change.job_id for change in changes if change.job_id is not None}
+    jobs = db.query(DetectionJob).filter(DetectionJob.id.in_(job_ids)).all() if job_ids else []
+    scores_by_job = {
+        job.id: {
+            score.get("change_id"): score
+            for score in (
+                (job.parameters if isinstance(job.parameters, dict) else {})
+                .get("candidate_model_scores") or []
+            )
+        }
+        for job in jobs
+    }
+    results = []
+    for change in changes:
+        response = DetectedChangeSchema.model_validate(change)
+        scores = scores_by_job.get(change.job_id, {}).get(change.id, {})
+        response.model_mean_probability = scores.get("mean_probability")
+        response.model_max_probability = scores.get("max_probability")
+        results.append(response)
+    return results
 
 @router.post("/levir/predict", response_model=LevirPredictionResponse)
 def predict_levir_change(
@@ -199,6 +251,90 @@ def predict_levir_change(
         candidate_alert_id=candidate_alert_id,
         candidate_alert_code=candidate_alert_code,
         disclaimer=prediction["disclaimer"]
+    )
+
+@router.post("/snunet/predict-upload", response_model=SNUNetPredictionResponse)
+async def predict_snunet_upload(
+    earlier_file: UploadFile = File(...),
+    later_file: UploadFile = File(...),
+    threshold: Optional[float] = Form(None),
+    current_user = Depends(get_current_user),
+):
+    """Run real EXP-02 SNUNet-CD inference for an aligned pair of RGB images."""
+    upload_dir = os.path.join(settings.STORAGE_DIR, "imagery")
+    os.makedirs(upload_dir, exist_ok=True)
+    allowed_extensions = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
+
+    extension_pairs = (
+        ("Earlier", earlier_file.filename),
+        ("Later", later_file.filename),
+    )
+    for label, filename in extension_pairs:
+        extension = os.path.splitext(filename or "")[1].lower()
+        if extension not in allowed_extensions:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unsupported {label.lower()} image format. "
+                    "Allowed: JPG, JPEG, PNG, TIF, TIFF, BMP."
+                ),
+            )
+
+    if threshold is not None and not 0.0 <= float(threshold) <= 1.0:
+        raise HTTPException(
+            status_code=422,
+            detail="Prediction threshold must be between 0 and 1.",
+        )
+
+    token = uuid.uuid4().hex[:10]
+    earlier_extension = os.path.splitext(earlier_file.filename)[1].lower()
+    later_extension = os.path.splitext(later_file.filename)[1].lower()
+    earlier_path = os.path.join(upload_dir, f"snunet_earlier_{token}{earlier_extension}")
+    later_path = os.path.join(upload_dir, f"snunet_later_{token}{later_extension}")
+
+    try:
+        with open(earlier_path, "wb") as output:
+            shutil.copyfileobj(earlier_file.file, output)
+        with open(later_path, "wb") as output:
+            shutil.copyfileobj(later_file.file, output)
+
+        prediction = snunet_model_service.run_prediction(
+            earlier_path=earlier_path,
+            later_path=later_path,
+            threshold=threshold,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"SNUNet-CD model execution error: {str(exc)}",
+        ) from exc
+
+    earlier_url = f"/storage/imagery/{os.path.basename(earlier_path)}"
+    later_url = f"/storage/imagery/{os.path.basename(later_path)}"
+    return SNUNetPredictionResponse(
+        model_name=prediction["model_name"],
+        model_type=prediction["model_type"],
+        architecture=prediction["architecture"],
+        checkpoint_path=prediction["checkpoint_path"],
+        epoch=prediction["epoch"],
+        threshold=prediction["threshold"],
+        normalization=prediction["normalization"],
+        patch_size=prediction["patch_size"],
+        dimensions=prediction["dimensions"],
+        total_pixels=prediction["total_pixels"],
+        changed_pixels=prediction["changed_pixels"],
+        changed_pixel_percentage=prediction["changed_pixel_percentage"],
+        mean_probability=prediction["mean_probability"],
+        max_probability=prediction["max_probability"],
+        min_probability=prediction["min_probability"],
+        probability_url=prediction["probability_url"],
+        mask_url=prediction["mask_url"],
+        overlay_url=prediction["overlay_url"],
+        earlier_image_url=earlier_url,
+        later_image_url=later_url,
+        disclaimer=prediction["disclaimer"],
     )
 
 @router.post("/levir/predict-upload", response_model=LevirPredictionResponse)

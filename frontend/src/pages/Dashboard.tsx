@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
-import { DashboardStats, Alert, MonitoringZone } from '../types';
+import { DashboardStats, Alert, MonitoringZone, DetectionJob } from '../types';
 import { KpiCard } from '../components/KpiCard';
 import { RiskBadge } from '../components/RiskBadge';
 import { StatusBadge } from '../components/StatusBadge';
@@ -21,7 +21,9 @@ export const Dashboard: React.FC = () => {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [trends, setTrends] = useState<any>(null);
   const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [changes, setChanges] = useState<any[]>([]);
   const [zones, setZones] = useState<MonitoringZone[]>([]);
+  const [jobs, setJobs] = useState<DetectionJob[]>([]);
   const [selectedZone, setSelectedZone] = useState<string>('ALL');
   const [selectedRisk, setSelectedRisk] = useState<string>('ALL');
   const [loading, setLoading] = useState<boolean>(true);
@@ -29,16 +31,20 @@ export const Dashboard: React.FC = () => {
   useEffect(() => {
     const loadDashboardData = async () => {
       try {
-        const [statsData, trendsData, alertsData, zonesData] = await Promise.all([
+        const [statsData, trendsData, alertsData, zonesData, jobData, changeData] = await Promise.all([
           api.getDashboardStats(),
           api.getDashboardTrends(),
           api.getAlerts(),
-          api.getZones()
+          api.getZones(),
+          api.getJobs(),
+          api.getChanges()
         ]);
         setStats(statsData);
         setTrends(trendsData);
         setAlerts(alertsData);
         setZones(zonesData);
+        setJobs(jobData);
+        setChanges(changeData);
       } catch (e) {
         console.error("Dashboard data load error:", e);
       } finally {
@@ -95,6 +101,48 @@ export const Dashboard: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {jobs[0] && (
+        <section className="rounded-xl border border-cyan-800/60 bg-slate-900 p-4 space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold text-white">Latest persisted monitoring run</h3>
+            <button onClick={() => navigate('/analysis')} className="text-xs text-cyan-300 hover:underline">Open analysis results</button>
+          </div>
+          <div className="text-xs text-slate-300">
+            {zones.find((zone) => zone.id === jobs[0].zone_id)?.name ?? `Zone ${jobs[0].zone_id}`} · {jobs[0].status} · {jobs[0].algorithm.replace(/_/g, ' ')}
+          </div>
+          {jobs[0].status === 'COMPLETED' && (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                <div className="rounded bg-slate-950 p-2"><span className="text-slate-500">Acquisitions</span><div className="text-white">{jobs[0].parameters?.historical_acquisition_date} → {jobs[0].parameters?.recent_acquisition_date}</div></div>
+                <div className="rounded bg-slate-950 p-2"><span className="text-slate-500">Valid pixels</span><div className="text-white">{jobs[0].parameters?.valid_pixel_coverage_percentage}% · {jobs[0].parameters?.analysis_crs}</div></div>
+                <div className="rounded bg-slate-950 p-2"><span className="text-slate-500">Candidates</span><div className="text-white">{jobs[0].changes_count ?? 0} polygons</div></div>
+                <div className="rounded bg-slate-950 p-2"><span className="text-slate-500">Candidate area</span><div className="text-white">{jobs[0].parameters?.total_changed_hectares ?? 0} ha</div></div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                {[
+                  [jobs[0].parameters?.historical_image_url, `Historical scene ${jobs[0].parameters?.historical_acquisition_date}`],
+                  [jobs[0].parameters?.recent_image_url, `Recent scene ${jobs[0].parameters?.recent_acquisition_date}`],
+                  [jobs[0].parameters?.candidate_mask_url, 'Candidate mask evidence'],
+                ].filter(([url]) => Boolean(url)).map(([url, label]) => (
+                  <figure key={String(url)} className="rounded border border-slate-800 bg-slate-950 overflow-hidden">
+                    <img src={String(url)} alt={String(label)} className="w-full h-36 object-contain" />
+                    <figcaption className="px-2 py-1 text-[10px] text-slate-400">{String(label)}</figcaption>
+                  </figure>
+                ))}
+              </div>
+              {jobs[0].parameters?.model_confidence_summary && (
+                <p className="text-[11px] text-slate-400">
+                  Mean valid-pixel SNUNet score: {jobs[0].parameters.model_confidence_summary.mean_probability};
+                  this is a model output score, not validated Sentinel-2 accuracy.
+                </p>
+              )}
+              {(jobs[0].changes_count ?? 0) === 0 && <p className="text-[11px] text-amber-300">No candidates passed this run’s thresholds. This does not prove absence of change or encroachment.</p>}
+              <p className="text-[11px] text-amber-300">LEVIR-CD+ training imagery and Sentinel-2 differ in sensor and resolution. Sentinel-2 performance has not been independently validated; confidence is a model score, not accuracy.</p>
+            </>
+          )}
+        </section>
+      )}
 
       {/* 8 Primary KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -191,6 +239,7 @@ export const Dashboard: React.FC = () => {
           <GISMapViewer
             zones={zones}
             alerts={filteredAlerts}
+            changes={changes.filter((change) => selectedZone === 'ALL' || String(change.zone_id) === selectedZone)}
             height="460px"
             onSelectAlert={(a) => navigate(`/alerts/${a.id}`)}
           />

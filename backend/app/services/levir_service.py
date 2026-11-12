@@ -37,6 +37,17 @@ from app.services.change_detection.morphological import (
 from ml.levir_model import load_classifier, predict_probability, FEATURE_SCHEMA
 from src.change_detection import make_overlay
 
+
+def resolve_detected_parcel_association(
+    matched_parcel: Optional[Any],
+    supplied_parcel_id: Optional[int] = None
+) -> Optional[int]:
+    """Resolve automatic parcel association without trusting an unverified caller ID."""
+    if matched_parcel is None:
+        return None
+    return matched_parcel.id
+
+
 class LevirModelService:
     def __init__(self, model_path: Optional[str] = None):
         if model_path is None:
@@ -209,8 +220,11 @@ class LevirModelService:
 
         # Match parcel
         matched_parcel = find_containing_parcel(geojson_poly, parcels)
-        matched_parcel_id = matched_parcel.id if matched_parcel else parcel_id
-        owner_type = matched_parcel.owner_type if matched_parcel else "GOVERNMENT"
+        matched_parcel_id = resolve_detected_parcel_association(
+            matched_parcel,
+            supplied_parcel_id=parcel_id
+        )
+        owner_type = matched_parcel.owner_type if matched_parcel else "UNKNOWN"
 
         # Check restricted boundaries
         intersects_restricted = False

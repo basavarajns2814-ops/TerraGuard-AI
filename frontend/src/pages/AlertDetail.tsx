@@ -217,13 +217,19 @@ export const AlertDetail: React.FC = () => {
               <span>Multi-Temporal Satellite Scene Comparison</span>
               <span className="text-emerald-400 font-mono text-[11px]">Sentinel-2 L2A (10m Resolution)</span>
             </h3>
-            <ImageCompareSlider
-              historicalImage={alert.historical_image_url || '/storage/imagery/sentinel2_hist_20251015.png'}
-              recentImage={alert.recent_image_url || '/storage/imagery/sentinel2_recent_20261001.png'}
-              maskImage={alert.change_mask_url || '/storage/masks/mask_demo.png'}
-              historicalDate={alert.first_observed_date}
-              recentDate={alert.latest_observed_date}
-            />
+            {alert.historical_image_url && alert.recent_image_url ? (
+              <ImageCompareSlider
+                historicalImage={alert.historical_image_url}
+                recentImage={alert.recent_image_url}
+                maskImage={alert.change_mask_url || undefined}
+                historicalDate={alert.first_observed_date}
+                recentDate={alert.latest_observed_date}
+              />
+            ) : (
+              <div className="h-64 rounded-lg border border-slate-800 bg-slate-950 flex items-center justify-center">
+                <p className="text-sm font-medium text-slate-400">Evidence unavailable</p>
+              </div>
+            )}
           </div>
 
           {/* 2. Focused GIS Map */}

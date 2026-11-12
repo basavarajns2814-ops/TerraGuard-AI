@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     COPERNICUS_CLIENT_SECRET: Optional[str] = None
     COPERNICUS_ENABLED: bool = False
 
+    GEE_PROJECT_ID: Optional[str] = None
+    GEE_SERVICE_ACCOUNT_EMAIL: Optional[str] = None
+    GEE_SERVICE_ACCOUNT_KEY_FILE: Optional[str] = None
+
     DEMO_MODE: bool = True
 
     @model_validator(mode="after")
@@ -50,4 +54,5 @@ os.makedirs(os.path.join(settings.STORAGE_DIR, "imagery"), exist_ok=True)
 os.makedirs(os.path.join(settings.STORAGE_DIR, "masks"), exist_ok=True)
 os.makedirs(os.path.join(settings.STORAGE_DIR, "evidence"), exist_ok=True)
 os.makedirs(os.path.join(settings.STORAGE_DIR, "reports"), exist_ok=True)
+os.makedirs(os.path.join(settings.STORAGE_DIR, "earth_engine"), exist_ok=True)
 os.makedirs(settings.DEMO_DATA_DIR, exist_ok=True)

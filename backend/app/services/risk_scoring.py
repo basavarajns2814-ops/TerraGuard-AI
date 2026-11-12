@@ -9,7 +9,7 @@ def evaluate_risk_and_confidence(
     observation_count: int = 1,
     trend: str = "NEW",
     cloud_coverage_percentage: float = 0.0,
-    parcel_owner_type: str = "GOVERNMENT"
+    parcel_owner_type: str = None
 ) -> Tuple[float, str, float, List[str]]:
     """
     Transparent, explainable risk assessment engine for land monitoring.
@@ -50,9 +50,17 @@ def evaluate_risk_and_confidence(
         reasons.append(f"Proximity warning: Candidate change is within {proximity_meters:.1f}m buffer of protected boundary")
 
     # 3. Parcel Ownership Status
-    if parcel_owner_type in ["GOVERNMENT", "PUBLIC_RESERVE", "FOREST"]:
+    normalized_owner_type = (
+        str(parcel_owner_type).strip().upper().replace("-", "_").replace(" ", "_")
+        if parcel_owner_type is not None
+        else "UNKNOWN"
+    )
+    if normalized_owner_type in {"UNKNOWN", "NONE", ""}:
+        normalized_owner_type = "UNKNOWN"
+
+    if normalized_owner_type in ["GOVERNMENT", "PUBLIC_RESERVE", "FOREST"]:
         base_score += 10.0
-        reasons.append(f"Land tenure check: Parcel registered as {parcel_owner_type.replace('_', ' ').title()}")
+        reasons.append(f"Land tenure check: Parcel registered as {normalized_owner_type.replace('_', ' ').title()}")
 
     # 4. Area Magnitude
     if affected_area_sqm >= 1500.0:

@@ -1,12 +1,32 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
-import { DetectionJob, MonitoringZone, SatelliteScene, DetectedChange, LevirPredictionResponse } from '../types';
+import {
+  DetectionJob, MonitoringZone, SatelliteScene, DetectedChange,
+  LevirPredictionResponse, SNUNetPredictionResponse
+} from '../types';
 import { RiskBadge } from '../components/RiskBadge';
 import {
   Activity, Play, CheckCircle, Clock, AlertCircle,
-  Layers, Sliders, Cpu, ArrowRight, Eye, RefreshCw
+  Layers, Sliders, Cpu, ArrowRight, Eye, RefreshCw, Upload
 } from 'lucide-react';
+
+const RGB_IMAGE_EXTENSIONS = /\.(jpe?g|png|tif|tiff|bmp)$/i;
+
+const readImageDimensions = (file: File): Promise<{ width: number; height: number }> =>
+  new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve({ width: image.naturalWidth, height: image.naturalHeight });
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error(`Unable to decode ${file.name}. The file must be a valid RGB image.`));
+    };
+    image.src = objectUrl;
+  });
 
 export const Analysis: React.FC = () => {
   const navigate = useNavigate();
@@ -20,12 +40,23 @@ export const Analysis: React.FC = () => {
   const [selectedZoneId, setSelectedZoneId] = useState<number>(1);
   const [histSceneId, setHistSceneId] = useState<number>(1);
   const [recentSceneId, setRecentSceneId] = useState<number>(3);
-  const [algorithm, setAlgorithm] = useState<string>('SPECTRAL_NDVI_NDBI_DIFFERENCING');
-  const [threshold, setThreshold] = useState<number>(0.18);
+  const [algorithm, setAlgorithm] = useState<string>('SNUNET_CD');
+  const [threshold, setThreshold] = useState<number>(0.30);
   const [launching, setLaunching] = useState<boolean>(false);
   const [activeJob, setActiveJob] = useState<DetectionJob | null>(null);
   const [levirPrediction, setLevirPrediction] = useState<LevirPredictionResponse | null>(null);
   const [predictingLevir, setPredictingLevir] = useState(false);
+  const [earlierImage, setEarlierImage] = useState<File | null>(null);
+  const [laterImage, setLaterImage] = useState<File | null>(null);
+  const [earlierPreview, setEarlierPreview] = useState<string | null>(null);
+  const [laterPreview, setLaterPreview] = useState<string | null>(null);
+  const [snunetThreshold, setSNUNetThreshold] = useState<number>(0.3);
+  const [snunetPrediction, setSNUNetPrediction] = useState<SNUNetPredictionResponse | null>(null);
+  const [predictingSNUNet, setPredictingSNUNet] = useState(false);
+  const [snunetError, setSNUNetError] = useState<string | null>(null);
+  const zoneScenes = scenes
+    .filter((scene) => scene.zone_id === selectedZoneId && Boolean(scene.metadata_json?.raster_url))
+    .sort((a, b) => a.acquisition_date.localeCompare(b.acquisition_date));
 
   const fetchAnalysisData = async () => {
     try {
@@ -39,11 +70,21 @@ export const Analysis: React.FC = () => {
       setZones(z);
       setScenes(sc);
       setChanges(ch);
-      if (z.length > 0) setSelectedZoneId(z[0].id);
-      if (sc.length >= 2) {
-        setHistSceneId(sc[sc.length - 1].id);
-        setRecentSceneId(sc[0].id);
-      }
+
+      const params = new URLSearchParams(window.location.search);
+      const urlZoneId = params.get('zone_id');
+      const urlHistId = params.get('hist_scene_id');
+      const urlRecentId = params.get('recent_scene_id');
+
+      const targetZoneId = Number(urlZoneId) || z[0]?.id || 0;
+      const targetScenes = sc
+        .filter((scene) => scene.zone_id === targetZoneId && Boolean(scene.metadata_json?.raster_url))
+        .sort((a, b) => a.acquisition_date.localeCompare(b.acquisition_date));
+      setSelectedZoneId(targetZoneId);
+      const histFromUrl = targetScenes.find((scene) => scene.id === Number(urlHistId));
+      const recentFromUrl = targetScenes.find((scene) => scene.id === Number(urlRecentId));
+      setHistSceneId(histFromUrl?.id ?? targetScenes[0]?.id ?? 0);
+      setRecentSceneId(recentFromUrl?.id ?? targetScenes[targetScenes.length - 1]?.id ?? 0);
     } catch (e) {
       console.error("Error loading analysis data:", e);
     } finally {
@@ -79,6 +120,12 @@ export const Analysis: React.FC = () => {
 
   const handleLaunchJob = async (e: React.FormEvent) => {
     e.preventDefault();
+    const historical = zoneScenes.find((scene) => scene.id === histSceneId);
+    const recent = zoneScenes.find((scene) => scene.id === recentSceneId);
+    if (!historical || !recent || historical.id === recent.id || historical.acquisition_date >= recent.acquisition_date) {
+      alert('Select two native GeoTIFF scenes from this monitoring zone, with the historical date first.');
+      return;
+    }
     setLaunching(true);
     try {
       const job = await api.runAnalysis({
@@ -110,6 +157,78 @@ export const Analysis: React.FC = () => {
       alert(e.message || 'LEVIR-CD+ prediction failed');
     } finally {
       setPredictingLevir(false);
+    }
+  };
+
+  const handleEarlierImage = (file: File | null) => {
+    if (!file) return;
+    setSNUNetError(null);
+    setSNUNetPrediction(null);
+    if (!RGB_IMAGE_EXTENSIONS.test(file.name)) {
+      setSNUNetError('Invalid earlier image format. Use JPG, PNG, TIF, TIFF or BMP.');
+      setEarlierImage(null);
+      if (earlierPreview) URL.revokeObjectURL(earlierPreview);
+      setEarlierPreview(null);
+      return;
+    }
+    if (earlierPreview) URL.revokeObjectURL(earlierPreview);
+    setEarlierImage(file);
+    setEarlierPreview(URL.createObjectURL(file));
+  };
+
+  const handleLaterImage = (file: File | null) => {
+    if (!file) return;
+    setSNUNetError(null);
+    setSNUNetPrediction(null);
+    if (!RGB_IMAGE_EXTENSIONS.test(file.name)) {
+      setSNUNetError('Invalid later image format. Use JPG, PNG, TIF, TIFF or BMP.');
+      setLaterImage(null);
+      if (laterPreview) URL.revokeObjectURL(laterPreview);
+      setLaterPreview(null);
+      return;
+    }
+    if (laterPreview) URL.revokeObjectURL(laterPreview);
+    setLaterImage(file);
+    setLaterPreview(URL.createObjectURL(file));
+  };
+
+  const handleSNUNetPrediction = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setSNUNetError(null);
+    setSNUNetPrediction(null);
+
+    if (!earlierImage || !laterImage) {
+      setSNUNetError('Select both an earlier and a later RGB image.');
+      return;
+    }
+    if (!RGB_IMAGE_EXTENSIONS.test(earlierImage.name) || !RGB_IMAGE_EXTENSIONS.test(laterImage.name)) {
+      setSNUNetError('Invalid image format. Use JPG, PNG, TIF, TIFF or BMP.');
+      return;
+    }
+
+    setPredictingSNUNet(true);
+    try {
+      const earlierDimensions = await readImageDimensions(earlierImage);
+      const laterDimensions = await readImageDimensions(laterImage);
+      if (
+        earlierDimensions.width !== laterDimensions.width ||
+        earlierDimensions.height !== laterDimensions.height
+      ) {
+        throw new Error(
+          `Image dimensions must match: earlier ${earlierDimensions.width}x${earlierDimensions.height}, later ${laterDimensions.width}x${laterDimensions.height}.`
+        );
+      }
+
+      const prediction = await api.predictSNUNetChange(
+        earlierImage,
+        laterImage,
+        snunetThreshold
+      );
+      setSNUNetPrediction(prediction);
+    } catch (error: any) {
+      setSNUNetError(error?.message || 'SNUNet-CD prediction failed.');
+    } finally {
+      setPredictingSNUNet(false);
     }
   };
 
@@ -146,7 +265,15 @@ export const Analysis: React.FC = () => {
               <label className="block text-slate-300 font-medium mb-1">Target Monitoring Zone</label>
               <select
                 value={selectedZoneId}
-                onChange={(e) => setSelectedZoneId(Number(e.target.value))}
+                onChange={(e) => {
+                  const nextZoneId = Number(e.target.value);
+                  const nextScenes = scenes
+                    .filter((scene) => scene.zone_id === nextZoneId && Boolean(scene.metadata_json?.raster_url))
+                    .sort((a, b) => a.acquisition_date.localeCompare(b.acquisition_date));
+                  setSelectedZoneId(nextZoneId);
+                  setHistSceneId(nextScenes[0]?.id ?? 0);
+                  setRecentSceneId(nextScenes[nextScenes.length - 1]?.id ?? 0);
+                }}
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-emerald-500"
               >
                 {zones.map(z => (
@@ -163,8 +290,8 @@ export const Analysis: React.FC = () => {
                   onChange={(e) => setHistSceneId(Number(e.target.value))}
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-emerald-500"
                 >
-                  {scenes.map(s => (
-                    <option key={s.id} value={s.id}>{s.acquisition_date}</option>
+                  {zoneScenes.map(s => (
+                    <option key={s.id} value={s.id}>{s.acquisition_date} · {s.cloud_coverage_percentage.toFixed(1)}% cloud</option>
                   ))}
                 </select>
               </div>
@@ -176,12 +303,19 @@ export const Analysis: React.FC = () => {
                   onChange={(e) => setRecentSceneId(Number(e.target.value))}
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-emerald-500"
                 >
-                  {scenes.map(s => (
-                    <option key={s.id} value={s.id}>{s.acquisition_date}</option>
+                  {zoneScenes.map(s => (
+                    <option key={s.id} value={s.id}>{s.acquisition_date} · {s.cloud_coverage_percentage.toFixed(1)}% cloud</option>
                   ))}
                 </select>
               </div>
             </div>
+
+            {zoneScenes.length < 2 && (
+              <div className="rounded-lg border border-amber-800 bg-amber-950/30 p-3 text-[11px] text-amber-200">
+                This zone needs two acquired native GeoTIFF scenes before real-area SNUNet analysis. Acquire a historical/recent pair in the Imagery page.
+                <button type="button" onClick={() => navigate(`/imagery?zone_id=${selectedZoneId}`)} className="ml-2 underline">Acquire scenes</button>
+              </div>
+            )}
 
             <div>
               <label className="block text-slate-300 font-medium mb-1">Detection Strategy Architecture</label>
@@ -190,11 +324,15 @@ export const Analysis: React.FC = () => {
                 onChange={(e) => setAlgorithm(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-emerald-500"
               >
+                <option value="SNUNET_CD">SNUNet-CD Deep Learning (EXP-02 Trained Checkpoint, Epoch 10)</option>
                 <option value="SPECTRAL_NDVI_NDBI_DIFFERENCING">Spectral Index Differencing (VARI/NDVI & Gray Difference)</option>
-                <option value="DEEP_LEARNING_SEGMENTATION">Deep Learning Building Edge Feature Extractor (U-Net Interface)</option>
+                <option value="LEVIR_CD_HIST_GRADIENT_BOOSTING">LEVIR-CD+ HistGradientBoosting Building Model</option>
                 <option value="OPTICAL_DIFFERENCE">Multi-Band Optical Reflectance Differencing</option>
               </select>
             </div>
+            <p className="text-[11px] leading-relaxed text-amber-300">
+              The EXP-02 SNUNet-CD checkpoint was trained on LEVIR-CD+ imagery. Sentinel-2 differs in sensor and resolution; its performance has not been independently validated, and model scores are not accuracy estimates.
+            </p>
 
             <div>
               <div className="flex justify-between items-center text-slate-300 mb-1">
@@ -214,7 +352,7 @@ export const Analysis: React.FC = () => {
 
             <button
               type="submit"
-              disabled={launching}
+              disabled={launching || zoneScenes.length < 2 || !histSceneId || !recentSceneId}
               className="w-full py-2.5 bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 text-white rounded-lg font-semibold flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/50 transition duration-150 disabled:opacity-50"
             >
               <Play className="w-4 h-4 fill-white" />
@@ -257,6 +395,141 @@ export const Analysis: React.FC = () => {
             )}
           </div>
 
+          <div className="border-t border-slate-800 pt-4 space-y-3">
+            <div>
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-300">
+                EXP-02 SNUNet-CD Change Model
+              </h3>
+              <p className="text-[11px] text-slate-500 mt-1">
+                Upload an aligned earlier/later image pair for pixel-level visual change inference.
+              </p>
+            </div>
+
+            <form onSubmit={handleSNUNetPrediction} className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block rounded-lg border border-dashed border-slate-700 bg-slate-950 p-2 cursor-pointer hover:border-cyan-500 transition">
+                  <span className="block text-[10px] text-slate-400 mb-1">Earlier RGB image</span>
+                  <input
+                    type="file"
+                    accept=".jpg,.jpeg,.png,.tif,.tiff,.bmp,image/jpeg,image/png,image/tiff,image/bmp"
+                    onChange={(event) => handleEarlierImage(event.target.files?.[0] || null)}
+                    className="block w-full text-[10px] text-slate-400 file:mr-2 file:rounded file:border-0 file:bg-slate-800 file:px-2 file:py-1 file:text-[10px] file:text-white"
+                  />
+                  {earlierPreview && (
+                    <img src={earlierPreview} alt="Earlier upload preview" className="mt-2 h-24 w-full object-contain rounded border border-slate-800" />
+                  )}
+                </label>
+                <label className="block rounded-lg border border-dashed border-slate-700 bg-slate-950 p-2 cursor-pointer hover:border-cyan-500 transition">
+                  <span className="block text-[10px] text-slate-400 mb-1">Later RGB image</span>
+                  <input
+                    type="file"
+                    accept=".jpg,.jpeg,.png,.tif,.tiff,.bmp,image/jpeg,image/png,image/tiff,image/bmp"
+                    onChange={(event) => handleLaterImage(event.target.files?.[0] || null)}
+                    className="block w-full text-[10px] text-slate-400 file:mr-2 file:rounded file:border-0 file:bg-slate-800 file:px-2 file:py-1 file:text-[10px] file:text-white"
+                  />
+                  {laterPreview && (
+                    <img src={laterPreview} alt="Later upload preview" className="mt-2 h-24 w-full object-contain rounded border border-slate-800" />
+                  )}
+                </label>
+              </div>
+
+              <div>
+                <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+                  <span>Probability threshold</span>
+                  <span className="font-mono text-cyan-400">{snunetThreshold.toFixed(2)}</span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={snunetThreshold}
+                  onChange={(event) => setSNUNetThreshold(parseFloat(event.target.value))}
+                  className="w-full accent-cyan-500"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={predictingSNUNet || !earlierImage || !laterImage}
+                className="w-full py-2.5 bg-gradient-to-r from-cyan-700 to-blue-700 hover:from-cyan-600 hover:to-blue-600 text-white rounded-lg text-xs font-semibold flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {predictingSNUNet ? (
+                  <>
+                    <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    Running SNUNet-CD inference…
+                  </>
+                ) : (
+                  <>
+                    <Upload className="w-4 h-4" /> Run SNUNet-CD Prediction
+                  </>
+                )}
+              </button>
+            </form>
+
+            {snunetError && (
+              <div className="rounded-lg border border-red-500/30 bg-red-950/30 p-3 text-xs text-red-300 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 flex-none mt-0.5" />
+                <span>{snunetError}</span>
+              </div>
+            )}
+
+            {snunetPrediction && (
+              <div className="rounded-lg border border-cyan-500/20 bg-slate-950 p-3 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-xs text-cyan-300 font-semibold">{snunetPrediction.model_name}</div>
+                    <div className="text-[10px] text-slate-500 mt-1">
+                      Epoch {snunetPrediction.epoch ?? 'N/A'} · Threshold {snunetPrediction.threshold}
+                    </div>
+                  </div>
+                  <CheckCircle className="w-4 h-4 text-emerald-400 flex-none" />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="rounded bg-slate-900 border border-slate-800 p-2">
+                    <div className="text-[10px] text-slate-500">Changed Pixels</div>
+                    <div className="text-white font-mono font-bold">{snunetPrediction.changed_pixels.toLocaleString()}</div>
+                  </div>
+                  <div className="rounded bg-slate-900 border border-slate-800 p-2">
+                    <div className="text-[10px] text-slate-500">Changed Percentage</div>
+                    <div className="text-cyan-300 font-mono font-bold">{snunetPrediction.changed_pixel_percentage}%</div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <figure className="rounded border border-slate-800 overflow-hidden bg-black">
+                    <img src={earlierPreview || snunetPrediction.earlier_image_url} alt="Earlier satellite image" className="w-full aspect-video object-contain" />
+                    <figcaption className="text-[10px] text-slate-400 px-2 py-1.5 border-t border-slate-800">Earlier image</figcaption>
+                  </figure>
+                  <figure className="rounded border border-slate-800 overflow-hidden bg-black">
+                    <img src={laterPreview || snunetPrediction.later_image_url} alt="Later satellite image" className="w-full aspect-video object-contain" />
+                    <figcaption className="text-[10px] text-slate-400 px-2 py-1.5 border-t border-slate-800">Later image</figcaption>
+                  </figure>
+                  <figure className="rounded border border-slate-800 overflow-hidden bg-black">
+                    <img src={snunetPrediction.probability_url} alt="SNUNet-CD probability map" className="w-full aspect-video object-contain" />
+                    <figcaption className="text-[10px] text-slate-400 px-2 py-1.5 border-t border-slate-800">Probability map</figcaption>
+                  </figure>
+                  <figure className="rounded border border-slate-800 overflow-hidden bg-black">
+                    <img src={snunetPrediction.mask_url} alt="SNUNet-CD binary change mask" className="w-full aspect-video object-contain" />
+                    <figcaption className="text-[10px] text-slate-400 px-2 py-1.5 border-t border-slate-800">Binary change mask</figcaption>
+                  </figure>
+                  <figure className="sm:col-span-2 rounded border border-slate-800 overflow-hidden bg-black">
+                    <img src={snunetPrediction.overlay_url} alt="SNUNet-CD change overlay" className="w-full max-h-80 object-contain" />
+                    <figcaption className="text-[10px] text-slate-400 px-2 py-1.5 border-t border-slate-800">Change overlay</figcaption>
+                  </figure>
+                </div>
+
+                <div className="flex flex-wrap gap-3 text-[11px]">
+                  <a className="text-cyan-400 hover:underline" href={snunetPrediction.probability_url} target="_blank" rel="noreferrer">Open probability map</a>
+                  <a className="text-cyan-400 hover:underline" href={snunetPrediction.mask_url} target="_blank" rel="noreferrer">Open change mask</a>
+                  <a className="text-cyan-400 hover:underline" href={snunetPrediction.overlay_url} target="_blank" rel="noreferrer">Open overlay</a>
+                </div>
+                <p className="text-[10px] leading-relaxed text-amber-300">{snunetPrediction.disclaimer}</p>
+              </div>
+            )}
+          </div>
+
           {/* Active Progress Card */}
           {activeJob && (
             <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2 mt-4">
@@ -274,6 +547,16 @@ export const Analysis: React.FC = () => {
                 <span>Progress: {activeJob.progress}%</span>
                 {activeJob.status === 'COMPLETED' && <span className="text-emerald-400">Analysis Completed</span>}
               </div>
+              {activeJob.status === 'FAILED' && activeJob.error_message && <div className="text-xs text-rose-300">{activeJob.error_message}</div>}
+              {activeJob.status === 'COMPLETED' && (
+                <div className="space-y-1 text-[11px] text-slate-300">
+                  <div>{activeJob.parameters?.historical_acquisition_date} → {activeJob.parameters?.recent_acquisition_date} · {activeJob.parameters?.analysis_crs}</div>
+                  <div>Valid common-grid pixels: {activeJob.parameters?.valid_pixel_count?.toLocaleString()} ({activeJob.parameters?.valid_pixel_coverage_percentage}%)</div>
+                  <div>{activeJob.changes_count ?? 0} candidate polygons · {activeJob.parameters?.total_changed_hectares ?? 0} ha candidate area</div>
+                  {activeJob.changes_count === 0 && <div className="text-amber-300">No candidates passed this run’s thresholds. This is not evidence that the area has no encroachment.</div>}
+                  <div className="text-amber-300">SNUNet was trained on LEVIR-CD+ imagery; Sentinel-2 is a different sensor and resolution domain. This result has not been independently validated for Sentinel-2 and is not an accuracy claim.</div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -299,7 +582,7 @@ export const Analysis: React.FC = () => {
                       {j.status}
                     </span>
                     <div className="text-[10px] text-slate-500 font-mono mt-0.5">
-                      {j.changes_count || 3} candidates identified
+                      {j.changes_count ?? 0} candidates identified
                     </div>
                   </div>
                 </div>
@@ -322,7 +605,9 @@ export const Analysis: React.FC = () => {
                   <tr>
                     <th className="py-2 px-3">Classification</th>
                     <th className="py-2 px-3">Risk</th>
-                    <th className="py-2 px-3">Area (m²)</th>
+                    <th className="py-2 px-3">Area (ha)</th>
+                    <th className="py-2 px-3">SNUNet mean</th>
+                    <th className="py-2 px-3">Composite</th>
                     <th className="py-2 px-3">Centroid</th>
                     <th className="py-2 px-3">Trend</th>
                   </tr>
@@ -332,7 +617,9 @@ export const Analysis: React.FC = () => {
                     <tr key={c.id} className="hover:bg-slate-800/40">
                       <td className="py-2.5 px-3 font-semibold text-slate-200">{c.category.replace('_', ' ')}</td>
                       <td className="py-2.5 px-3"><RiskBadge level={c.risk_level} score={c.risk_score} /></td>
-                      <td className="py-2.5 px-3 font-mono text-cyan-400">{c.affected_area_sqm.toLocaleString()}</td>
+                      <td className="py-2.5 px-3 font-mono text-cyan-400">{c.affected_area_hectares.toFixed(3)}</td>
+                      <td className="py-2.5 px-3 font-mono text-cyan-300">{c.model_mean_probability == null ? '—' : `${(c.model_mean_probability * 100).toFixed(1)}%`}</td>
+                      <td className="py-2.5 px-3 font-mono text-slate-300">{(c.confidence_score * 100).toFixed(1)}%</td>
                       <td className="py-2.5 px-3 font-mono text-slate-400 text-[10px]">{c.centroid_lat.toFixed(4)}, {c.centroid_lng.toFixed(4)}</td>
                       <td className="py-2.5 px-3 font-mono text-emerald-400 font-bold">{c.trend}</td>
                     </tr>
@@ -340,6 +627,7 @@ export const Analysis: React.FC = () => {
                 </tbody>
               </table>
             </div>
+            {changes.length === 0 && <p className="text-[11px] text-amber-300">No candidate polygons are currently stored. Zero candidates do not establish that no land change or encroachment occurred.</p>}
           </div>
         </div>
       </div>

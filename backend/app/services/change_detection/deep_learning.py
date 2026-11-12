@@ -2,43 +2,57 @@ import numpy as np
 from typing import Dict, Any, Tuple
 from app.services.change_detection.base import ChangeDetectionStrategy
 
+
 class DeepLearningSegmentationStrategy(ChangeDetectionStrategy):
     """
-    Pluggable Deep Learning Segmentation Strategy (U-Net / Siamese ResNet architecture placeholder).
+    SNUNet-CD Deep Learning Change Detection Strategy.
+    Powered by the trained EXP-02 Siamese Nested U-Net (7.79M parameters, base_width=32).
 
-    Status: Experimental / Pluggable Interface.
-    Limitations & Documentation:
-    - Pretrained on generic remote sensing feature sets.
-    - Operates as an advanced edge & structural candidate extractor until fine-tuned
-      on regional cadastral ground-truth datasets for Karnataka/Bengaluru land parcels.
-    - Uses gradient magnitude and high-frequency structural differencing to isolate building edges.
+    Trained on remote sensing change detection datasets.
+    Sentinel-2 inference is executed using 512x512 edge-aligned tiling with
+    standardized RGB normalization (mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]).
     """
+
     def detect(
         self,
         historical_img: np.ndarray,
         recent_img: np.ndarray,
         parameters: Dict[str, Any]
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
-        from PIL import Image, ImageFilter
+        threshold = float(parameters.get("threshold", 0.30))
 
-        h_gray = Image.fromarray(historical_img).convert('L')
-        r_gray = Image.fromarray(recent_img).convert('L')
+        try:
+            from app.services.snunet_service import snunet_model_service
 
-        # Extract structural edges (Sobel/Laplacian gradient approximation)
-        h_edges = np.array(h_gray.filter(ImageFilter.FIND_EDGES)).astype(np.float32)
-        r_edges = np.array(r_gray.filter(ImageFilter.FIND_EDGES)).astype(np.float32)
+            probabilities = snunet_model_service.infer_probabilities(
+                earlier=historical_img,
+                later=recent_img,
+                valid_mask=parameters.get("valid_data_mask"),
+            )
+            mask_bool = probabilities >= threshold
+            binary_mask = (mask_bool.astype(np.uint8)) * 255
 
-        # Difference in structural building edges
-        edge_diff = np.abs(r_edges - h_edges)
-        threshold = parameters.get("edge_threshold", 45.0)
-        binary_mask = (edge_diff > threshold).astype(np.uint8) * 255
+            changed_pixels = int(np.count_nonzero(mask_bool))
+            total_pixels = int(binary_mask.size)
+            pct = round((changed_pixels / total_pixels * 100.0), 3) if total_pixels else 0.0
 
-        metadata = {
-            "algorithm": "Deep Learning / Structural Building Footprint Heuristic (U-Net Interface)",
-            "model_architecture": "Siamese-UNet-FeatureDiff-v1.0",
-            "edge_threshold": threshold,
-            "status": "Candidate Extraction (Requires ground-truth field verification)",
-            "version": "1.0.0-dl-preview"
-        }
+            metadata = {
+                "algorithm": "SNUNet-CD Deep Learning Change Detection",
+                "model_architecture": "SNUNetCD (Nested Dense Channel Attention, base_width=32)",
+                "checkpoint": "EXP-02 full_seed42_512_recovery_v2 epoch 10",
+                "threshold": threshold,
+                "changed_pixel_percentage": pct,
+                "changed_pixels": changed_pixels,
+                "total_pixels": total_pixels,
+                "mean_probability": round(float(probabilities.mean()), 4),
+                "max_probability": round(float(probabilities.max()), 4),
+                "probability_map": probabilities,
+                "status": "Inference Complete (Requires human & geospatial verification)",
+                "version": "2.0.0-snunet-cd"
+            }
+            return binary_mask, metadata
 
-        return binary_mask, metadata
+        except Exception as exc:
+            raise RuntimeError(
+                f"SNUNet-CD inference failed; no substitute detections were generated: {exc}"
+            ) from exc

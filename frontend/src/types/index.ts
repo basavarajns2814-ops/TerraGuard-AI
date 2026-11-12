@@ -66,6 +66,43 @@ export interface SatelliteScene {
   created_at: string;
 }
 
+export interface SatelliteImageMetadata {
+  date?: string;
+  cloud_coverage_percentage?: number;
+  satellite: string;
+  dataset: string;
+  image_url?: string;
+  geotiff_url?: string;
+  thumbnail_url?: string;
+  width: number;
+  height: number;
+  resolution_meters: number;
+  crs: string;
+    transform?: number[];
+    raster_width?: number;
+    raster_height?: number;
+    nodata?: number;
+    valid_pixel_count?: number;
+    zone_pixel_count?: number;
+    valid_pixel_coverage_percentage?: number;
+  extent?: any;
+  available: boolean;
+  cached: boolean;
+  processing_status: string;
+}
+
+export interface SatelliteCompareResponse {
+  status: string;
+  source: string;
+  dataset: string;
+  historical: SatelliteImageMetadata;
+  recent: SatelliteImageMetadata;
+  historical_scene_id?: number;
+  recent_scene_id?: number;
+  zone_id?: number;
+  disclaimer: string;
+}
+
 export interface DetectionJob {
   id: number;
   job_code: string;
@@ -99,6 +136,8 @@ export interface DetectedChange {
   parcel_id?: number;
   category: ChangeCategory;
   confidence_score: number; // 0.0 - 1.0
+    model_mean_probability?: number | null;
+    model_max_probability?: number | null;
   risk_score: number; // 0 - 100
   risk_level: RiskLevel;
   affected_area_sqm: number;
@@ -271,5 +310,36 @@ export interface LevirPredictionResponse {
   later_image_url?: string;
   candidate_alert_id?: number;
   candidate_alert_code?: string;
+  disclaimer: string;
+}
+
+export interface SNUNetPredictionResponse {
+  model_name: string;
+  model_type: string;
+  architecture: string;
+  checkpoint_path: string;
+  epoch: number | null;
+  threshold: number;
+  normalization: {
+    mean: number[];
+    std: number[];
+  };
+  patch_size: number;
+  dimensions: {
+    width: number;
+    height: number;
+    channels: number;
+  };
+  total_pixels: number;
+  changed_pixels: number;
+  changed_pixel_percentage: number;
+  mean_probability: number;
+  max_probability: number;
+  min_probability: number;
+  probability_url: string;
+  mask_url: string;
+  overlay_url: string;
+  earlier_image_url: string;
+  later_image_url: string;
   disclaimer: string;
 }

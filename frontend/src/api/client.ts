@@ -3,13 +3,13 @@ import {
   LandParcel, RestrictedBoundary, SatelliteScene, DetectionJob,
   DetectedChange, Alert, AlertStatus, NotificationItem, SystemSettings, AuditLog
 } from '../types';
-import type { LevirPredictionResponse } from '../types';
+import type { LevirPredictionResponse, SNUNetPredictionResponse, SatelliteCompareResponse } from '../types';
 
 const API_BASE = '/api';
 
 function getAuthHeaders(): HeadersInit {
   const token = localStorage.getItem('terraguard_token');
-  return token ? { 'Authorization': `Bearer ${token}` } : {};
+  return token ? { Authorization: 'Bearer ' + token } : {};
 }
 
 async function handleResponse<T>(res: Response): Promise<T> {
@@ -77,6 +77,23 @@ export const api = {
     return handleResponse<MonitoringZone>(res);
   },
 
+  async updateZone(zoneId: number, data: Partial<MonitoringZone>): Promise<MonitoringZone> {
+    const res = await fetch(`${API_BASE}/zones/${zoneId}`, {
+      method: 'PUT',
+      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    return handleResponse<MonitoringZone>(res);
+  },
+
+  async deleteZone(zoneId: number): Promise<{ message: string; id: number }> {
+    const res = await fetch(`${API_BASE}/zones/${zoneId}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders()
+    });
+    return handleResponse<{ message: string; id: number }>(res);
+  },
+
   async getParcels(zoneId?: number): Promise<LandParcel[]> {
     const url = zoneId ? `${API_BASE}/zones/parcels/all?zone_id=${zoneId}` : `${API_BASE}/zones/parcels/all`;
     const res = await fetch(url, { headers: getAuthHeaders() });
@@ -113,6 +130,31 @@ export const api = {
       headers: getAuthHeaders()
     });
     return handleResponse<any>(res);
+  },
+
+  async getSatelliteHealth(): Promise<any> {
+    const res = await fetch(`${API_BASE}/satellite/health`, {
+      headers: getAuthHeaders()
+    });
+    return handleResponse<any>(res);
+  },
+
+  async previewSatellite(data: any): Promise<any> {
+    const res = await fetch(`${API_BASE}/satellite/preview`, {
+      method: 'POST',
+      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    return handleResponse<any>(res);
+  },
+
+  async compareSatellite(data: any): Promise<SatelliteCompareResponse> {
+    const res = await fetch(`${API_BASE}/satellite/compare`, {
+      method: 'POST',
+      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    return handleResponse<SatelliteCompareResponse>(res);
   },
 
   // Analysis
@@ -162,6 +204,26 @@ export const api = {
       body: JSON.stringify(data)
     });
     return handleResponse<LevirPredictionResponse>(res);
+  },
+
+  async predictSNUNetChange(
+    earlierFile: File,
+    laterFile: File,
+    threshold?: number
+  ): Promise<SNUNetPredictionResponse> {
+    const formData = new FormData();
+    formData.append('earlier_file', earlierFile);
+    formData.append('later_file', laterFile);
+    if (threshold !== undefined) {
+      formData.append('threshold', String(threshold));
+    }
+
+    const res = await fetch(`${API_BASE}/analysis/snunet/predict-upload`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: formData
+    });
+    return handleResponse<SNUNetPredictionResponse>(res);
   },
 
   // Alerts
